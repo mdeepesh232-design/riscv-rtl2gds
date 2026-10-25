@@ -2,7 +2,7 @@
 
 A single-cycle RISC-V core taken through synthesis, floorplan, placement, clock tree synthesis, routing and GDS generation with the OpenROAD-flow-scripts (ORFS) on the Nangate45 45 nm open library, followed by a clock-period sweep and a review of setup, hold and reset-removal timing.
 
-**Version:** v1 (physical-design results). Functional verification is limited to one directed test; see [Limitations](#limitations).
+**Version:** v2 (physical-design results plus self-checking, scoreboard and random verification in Icarus Verilog). No compliance suite or UVM yet; see [Limitations](#limitations).
 
 **Author:** Deepesh M
 
@@ -19,7 +19,7 @@ A single-cycle RISC-V core taken through synthesis, floorplan, placement, clock 
 | Technology | Nangate45 (ORFS platform `nangate45`) |
 | Tools | Yosys (synthesis), OpenROAD 26Q3 (PnR), run inside Docker |
 
-Instructions exercised by the testbench: `addi`, `add`, `sub`, `sw`, `lw`, `beq`.
+Supported and tested instructions: `add`, `sub`, `and`, `or`, `xor`, `slt`, `addi`, `lw`, `sw`, `beq`, `jal`, `lui`.
 
 ### Core interface
 
@@ -35,10 +35,13 @@ The memories are deliberately **outside** the core so the physical design measur
 designs/riscv_core/
   src/    core RTL only (this is what synthesis reads)
   sim/    instruction_memory.v, data_memory.v, riscv_top.v (simulation only)
-  tb/     tb_riscv_core.v
+  tb/     tb_riscv_core.v (self-checking directed test), scoreboard.vh (monitor + reference model),
+          tb_random.v (random instruction test)
 designs/nangate45/riscv_core/
   config.mk, constraint.sdc, constraint_<period>.sdc (sweep copies)
 ```
+
+To run the flow, copy the `designs/` folder into `OpenROAD-flow-scripts/flow/designs/`.
 
 ---
 
@@ -142,13 +145,35 @@ Hold and reset-removal slack at the fast periods:
 
 ---
 
-## 6. Reproducing the results
+## 6. Functional verification
+
+Simulated with Icarus Verilog. The physical-design results above do not depend on the testbenches (they are not in `src/`).
+
+| Layer | What it does | Result |
+|---|---|---|
+| Self-checking directed test | Fixed program with expected values and PASS/FAIL checks (`tb_riscv_core.v`) | 22 / 22 checks pass |
+| Monitor + scoreboard | Every cycle, compares the DUT's PC, register write, memory write and final register file with a small reference model of the instruction set (`scoreboard.vh`) | 135 checks, 0 mismatches on the directed program |
+| Random instruction test | 100 random instructions per seed from the 12 supported ones, checked by the scoreboard (`tb_random.v`) | 20 seeds, about 7,900 checks, 0 mismatches |
+
+**Directed test coverage:** all 12 instructions, a negative immediate, signed `slt` (both outcomes), a write to `x0` (ignored), a taken and a not-taken `beq`, the `jal` link address, and `lui`.
+
+**Random test constraints:** registers `x0` to `x15`, `lw`/`sw` through `x0` with 16 word addresses, and `beq`/`jal` jump forward only (no loops). Each run takes `+seed=N`, so a failure can be repeated exactly.
+
+**Checking the checkers (mutation tests):** the reference model was broken on purpose (`sub` computed as `add`, then `and` computed as `or`). The directed scoreboard reported 2 mismatches for the `sub` change. The random test reported mismatches in 19 of 20 seeds for the `and` change. After restoring the model, all runs returned to 0 mismatches.
+
+---
+
+## 7. Reproducing the results
 
 Inside the ORFS Docker container, from `/OpenROAD-flow-scripts/flow`:
 
 ```bash
 # simulation (from designs/riscv_core)
-iverilog -o sim.out src/*.v sim/*.v tb/tb_riscv_core.v && vvp sim.out
+iverilog -I tb -o sim.out src/*.v sim/*.v tb/tb_riscv_core.v && vvp sim.out
+
+# random test: 20 seeds
+iverilog -I tb -o sim_rand.out src/*.v sim/*.v tb/tb_random.v
+for s in $(seq 1 20); do echo -n "seed $s: "; vvp sim_rand.out +seed=$s | grep SCOREBOARD; done
 
 # baseline flow
 make DESIGN_CONFIG=./designs/nangate45/riscv_core/config.mk FLOW_VARIANT=core_only
@@ -171,9 +196,10 @@ done
 
 ---
 
-## 7. Limitations
+## 8. Limitations
 
-- **Functional verification is minimal:** one directed test covering `addi`, `add`, `sub`, `sw`, `lw` and `beq`. No compliance suite and no UVM environment yet.
+- **Verification is limited:** one directed program plus constrained random tests, checked against a reference model written by the author (so a misunderstanding of the spec could appear in both). No functional coverage measurement, no RISC-V compliance suite and no UVM environment yet.
+- Random tests use only forward branches, registers `x0` to `x15` and a small data address range.
 - Single-cycle microarchitecture; the register file is built from flip-flops, and memories are behavioral and outside the core.
 - External I/O delays are an assumption (20% of the period), not measured memory timing.
 - `SKIP_CTS_REPAIR_TIMING=1`: hold and removal were checked but never repaired by the tool.
@@ -183,9 +209,9 @@ done
 
 ---
 
-## 8. Next steps
+## 9. Next steps
 
-1. Verification: self-checking tests, more directed tests, then a UVM environment with monitor, scoreboard and coverage, and RISC-V compliance tests.
+1. Verification: functional coverage, RISC-V compliance tests for the supported instructions, then a UVM environment (needs a UVM-capable simulator).
 2. Re-run the flow if verification changes the RTL, and update the tables.
 3. Utilization and placement-density sweeps (for example 30%, 45%, 60%) to study congestion and wire length.
 4. A pipelined version (5-stage with forwarding and hazard handling) compared against this baseline.
